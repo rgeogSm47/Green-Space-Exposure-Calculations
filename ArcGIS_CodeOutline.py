@@ -1,6 +1,6 @@
 #ArcGIS Pro python code for processing WorldCover rasters
 #Author: Rory Smith
-#
+#Last date edited: 5/6/2026
 import arcpy
 
 arcpy.env.workspace = "D:\StateName\DataFolder"
