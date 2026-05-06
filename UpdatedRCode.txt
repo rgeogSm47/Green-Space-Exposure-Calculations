@@ -1,0 +1,381 @@
+#R code for Green Space Exposure Calculations
+#Author: Rory Smith 
+#Last date edited: 5/6/2026
+
+#Paste this code into an R file
+#Change the directory 3, initial blocks layer 16, LODES files 19 22, output csv name 62 (if using), and graph bandwidths (if applicable).
+rm(list=ls())
+setwd("")
+library(car)
+library(classInt)
+library(spdep)
+library(RColorBrewer)
+library(sf)
+library(ggplot2)
+install.packages("dplyr")
+library(tidyr)
+library(dplyr)
+
+#Load main + neighbor blocks layer with corresponding green space percentages
+#Has empty w_geocode and h_geocode fields
+stateIngreen <- st_read(dsn=getwd(), layer="")
+
+#Load LODES main file
+stateIn_2021_main <- read.csv("", header=TRUE, stringsAsFactors=FALSE)
+
+#Load LODES aux_combined file
+stateIn_2021_aux <- read.csv("", header=TRUE, stringsAsFactors=FALSE)
+
+#Append aux to main file
+stateLODES <- rbind(stateIn_2021_main, stateIn_2021_aux)
+
+#Assign geocodes to w_geocode and h_geocode
+stateIngreen$w_geocode <- stateIngreen$GEOID20
+stateIngreen$h_geocode <- stateIngreen$GEOID20
+
+#Make a copy of original file and make w_geocode and h_geocode numbers
+workSIgreen <- stateIngreen
+workSIgreen$w_geocode <- as.numeric(workSIgreen$w_geocode)
+workSIgreen$h_geocode <- as.numeric(workSIgreen$h_geocode)
+
+#Perform a join of LODES and copy of workSIgreen by w_geocode, change MEAN to Percent_ar for parks!!
+workSIgreen <- left_join(stateLODES, workSIgreen, by = "w_geocode")
+workSIgreen$Work <- workSIgreen$MEAN
+
+#Do the same process with another copy of orginial stateGreen but with home geocodes
+homeSIgreen <- stateIngreen
+homeSIgreen$w_geocode <- as.numeric(homeSIgreen$w_geocode)
+homeSIgreen$h_geocode <- as.numeric(homeSIgreen$h_geocode)
+homeSIgreen <- left_join(stateLODES, homeSIgreen, by = "h_geocode")
+workSIgreen$Home <- homeSIgreen$MEAN
+
+#Calculate distance of commutes to eliminate stretch commutes greater than 100 miles
+#Using GEOID20 INTPTLAT20 INTPLON20 from green shapefiles
+distance <- stateIngreen %>%
+  select(GEOID20, INTPTLAT20, INTPTLON20)
+distance$h_geocode.x <- distance$GEOID20
+distance$h_geocode.x <- as.numeric(distance$h_geocode.x)
+workSIgreen <- left_join(workSIgreen, distance, by = "h_geocode.x")
+workSIgreen$INTPTLON20.x <- as.numeric(workSIgreen$INTPTLON20.x)
+workSIgreen$INTPTLAT20.x <- as.numeric(workSIgreen$INTPTLAT20.x)
+workSIgreen$INTPTLON20.y <- as.numeric(workSIgreen$INTPTLON20.y)
+workSIgreen$INTPTLAT20.y <- as.numeric(workSIgreen$INTPTLAT20.y)
+install.packages('geosphere')
+library(geosphere)
+workSIgreen$distance_m <- distHaversine(cbind(workSIgreen$INTPTLON20.x, workSIgreen$INTPTLAT20.x), cbind(workSIgreen$INTPTLON20.y, workSIgreen$INTPTLAT20.y))
+workSIgreen$distance_miles <- workSIgreen$distance_m * 0.000621371
+#st_write(workSIgreen, "state_GREEN.csv") (takes a long time to export)
+
+sum(workSIgreen$distance_miles > 100, na.rm = TRUE)
+newGreen <- workSIgreen[workSIgreen$distance_miles <= 100, ]
+
+#To make a commute map with a random selection of commutes. Import to ArcGIS to map. 
+set.seed(1)
+
+#Change number of lines based on size of state
+nG_small <- newGreen[sample(nrow(newGreen), 4000), ]
+
+lines_list <- lapply(1:nrow(nG_small), function(i) {
+  st_linestring(matrix(
+    c(nG_small$INTPTLON20.x[i], nG_small$INTPTLAT20.x[i],
+      nG_small$INTPTLON20.y[i], nG_small$INTPTLAT20.y[i]),
+    ncol = 2, byrow = TRUE
+  ))
+})
+
+# Create sf object
+lines_sf <- st_sf(
+  nG_small,  # keeps your attributes
+  geometry = st_sfc(lines_list, crs = 4326)
+)
+
+lines_sf <- lines_sf %>%
+  rename(
+    lon_start = INTPTLON20.x,
+    lat_start = INTPTLAT20.x,
+    lon_end   = INTPTLON20.y,
+    lat_end   = INTPTLAT20.y
+  )
+
+st_write(lines_sf, "statecommute_lines.gpkg", delete_layer = TRUE)
+
+#Population Weighted State Graphs
+#Change bw if needed
+
+stateGreen_expanded <- newGreen[rep(1:nrow(newGreen), newGreen$S000), ]
+
+stateGreen_long <- pivot_longer(stateGreen_expanded, cols = c("Work", "Home"), names_to = "type", values_to = "value" )
+
+#Simple boxplot and graph for work and home
+boxplot(stateGreen_long$value ~ stateGreen_long$type, col=c("darkslateblue", "seagreen"), main="Distribution of Home & Work Green Space Percentage", xlab="Home vs. Work", ylab="Green Space Percentage")
+ggplot(stateGreen_long, aes(x = value, color = type)) +
+  geom_density(bw = 0.1, alpha = 0.3) +
+  scale_color_manual(values = c("Work" = "seagreen", "Home" = "darkslateblue")) +
+  labs(title = "Density of Home & Work Green Space Percentage",
+       x = "Green Space Percentage",
+       y = "Density")
+
+stateGreen_expanded$Mobility <- (stateGreen_expanded$Home + stateGreen_expanded$Work) / 2
+t.test(stateGreen_expanded$Mobility, stateGreen_expanded$Home, paried = TRUE)
+t.test(stateGreen_expanded$Work, stateGreen_expanded$Home, paried = TRUE)
+stateGreen_long2 <- pivot_longer(stateGreen_expanded, cols = c("Mobility", "Home"), names_to = "type", values_to = "value" )
+
+#Simple box plot for mobility and home
+boxplot(stateGreen_long2$value ~ stateGreen_long2$type, col=c("darkslateblue", "sienna3"), main="Distribution of Home & Mobility Green Space Percentage", xlab="Home vs. Mobility", ylab="Green Space Percentage")
+
+#Better box plot and density graph for mobility and home
+#Compute sample sizes to display
+counts <- stateGreen_long2 %>%
+  group_by(type) %>%
+  summarise(n = n())
+
+ggplot(stateGreen_long2, aes(x = type, y = value, fill = type)) +
+  geom_boxplot() +
+  geom_text(data = counts,
+            aes(x = type, y = Inf, label = paste0("n = ", n)),
+            vjust = 1.5)+
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 20,
+    size = 2.5,
+    color = "black") +
+  scale_fill_manual(values = c("Mobility" = "indianred", "Home" = "steelblue1"))+
+  theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA))+
+  labs(x = NULL, y = "Green Percentage Value", fill = NULL)
+
+ggplot(stateGreen_long2, aes(x = value, color = type)) +
+  geom_density(bw = 0.1, alpha = 0.3, linewidth = 0.7) +
+  theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA))+
+  theme(
+    panel.grid.major = element_line(color = "gray92"),
+    panel.grid.minor = element_line(color = "gray92"))+
+  scale_color_manual(values = c("Mobility" = "indianred", "Home" = "steelblue1"))+ 
+  labs(x = "Green Percentage Value", y = "Density", color = NULL)
+
+mean(stateGreen_expanded$Work)
+mean(stateGreen_expanded$Home)
+mean(stateGreen_expanded$Mobility)
+
+sd(stateGreen_expanded$Home)
+sd(stateGreen_expanded$Mobility)
+
+#Monthly Income Calculations
+
+#Low Income
+stateGreen_expLowInc <- newGreen[rep(1:nrow(newGreen), newGreen$SE01), ]
+stateGreen_expLowInc$Group <- c("Low")
+stateGreen_expLowInc$Mobility <- (stateGreen_expLowInc$Home + stateGreen_expLowInc$Work) / 2
+t.test(stateGreen_expLowInc$Work, stateGreen_expLowInc$Home, paried = TRUE)
+t.test(stateGreen_expLowInc$Mobility, stateGreen_expLowInc$Home, paried = TRUE)
+stateGreen_longLIMob <- pivot_longer(stateGreen_expLowInc, cols = c("Mobility", "Home"), names_to = "type", values_to = "value" )
+boxplot(stateGreen_longLIMob$value ~ stateGreen_longLIMob$type, col=c("darkslateblue", "sienna3"), main="Home and Mobility Green Space Exposure for Low Income", xlab="Home vs. Mobility", ylab="Green Space Percentage")
+ggplot(stateGreen_longLIMob, aes(x = value, color = type)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  scale_color_manual(values = c("Mobility" = "sienna3", "Home" = "darkslateblue")) +
+  labs(title = "Home and Mobility Green Space Exposure for Low Income",
+       x = "Green Space Percentage",
+       y = "Density")
+
+stateGreen_longLIHW <- pivot_longer(stateGreen_expLowInc, cols = c("Work", "Home"), names_to = "type", values_to = "value" )
+boxplot(stateGreen_longLIHW$value ~ stateGreen_longLIHW$type, col=c("darkslateblue", "seagreen"), main="Home and Work Green Space Exposure for Low Income", xlab="Home vs. Work", ylab="Green Space Percentage")
+ggplot(stateGreen_longLIHW, aes(x = value, color = type)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  scale_color_manual(values = c("Work" = "seagreen", "Home" = "darkslateblue")) +
+  labs(title = "Home and Work Green Space Exposure for Low Income",
+       x = "Green Space Percentage",
+       y = "Density")
+
+
+#Middle Income
+stateGreen_expMidInc <- newGreen[rep(1:nrow(newGreen), newGreen$SE02), ]
+stateGreen_expMidInc$Group <- c("Middle")
+stateGreen_expMidInc$Mobility <- (stateGreen_expMidInc$Home + stateGreen_expMidInc$Work) / 2
+t.test(stateGreen_expMidInc$Work, stateGreen_expMidInc$Home, paried = TRUE)
+t.test(stateGreen_expMidInc$Mobility, stateGreen_expMidInc$Home, paried = TRUE)
+stateGreen_longMIMob <- pivot_longer(stateGreen_expMidInc, cols = c("Mobility", "Home"), names_to = "type", values_to = "value" )
+boxplot(stateGreen_longMIMob$value ~ stateGreen_longMIMob$type, col=c("darkslateblue", "sienna3"), main="Home and Mobility Green Space Exposure for Middle Income", xlab="Home vs. Mobility", ylab="Green Space Percentage")
+ggplot(stateGreen_longMIMob, aes(x = value, color = type)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  scale_color_manual(values = c("Mobility" = "sienna3", "Home" = "darkslateblue")) +
+  labs(title = "Home and Mobility Green Space Exposure for Middle Income",
+       x = "Green Space Percentage",
+       y = "Density")
+
+stateGreen_longMIHW <- pivot_longer(stateGreen_expMidInc, cols = c("Work", "Home"), names_to = "type", values_to = "value" )
+boxplot(stateGreen_longMIHW$value ~ stateGreen_longMIHW$type, col=c("darkslateblue", "seagreen"), main="Home and Work Green Space Exposure for Middle Income", xlab="Home vs. Work", ylab="Green Space Percentage")
+ggplot(stateGreen_longMIHW, aes(x = value, color = type)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  scale_color_manual(values = c("Work" = "seagreen", "Home" = "darkslateblue")) +
+  labs(title = "Home and Work Green Space Exposure for Middle Income",
+       x = "Green Space Percentage",
+       y = "Density")
+
+
+#High Income
+stateGreen_expHighInc <- newGreen[rep(1:nrow(newGreen), newGreen$SE03), ]
+stateGreen_expHighInc$Group <- c("High")
+stateGreen_expHighInc$Mobility <- (stateGreen_expHighInc$Home + stateGreen_expHighInc$Work) / 2
+t.test(stateGreen_expHighInc$Work, stateGreen_expHighInc$Home, paried = TRUE)
+t.test(stateGreen_expHighInc$Mobility, stateGreen_expHighInc$Home, paried = TRUE)
+stateGreen_longHIMob <- pivot_longer(stateGreen_expHighInc, cols = c("Mobility", "Home"), names_to = "type", values_to = "value" )
+boxplot(stateGreen_longHIMob$value ~ stateGreen_longHIMob$type, col=c("darkslateblue", "sienna3"), main="Home and Mobility Green Space Exposure for High Income", xlab="Home vs. Mobility", ylab="Green Space Percentage")
+ggplot(stateGreen_longHIMob, aes(x = value, color = type)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  scale_color_manual(values = c("Mobility" = "sienna3", "Home" = "darkslateblue")) +
+  labs(title = "Home and Mobility Green Space Exposure for High Income",
+       x = "Green Space Percentages",
+       y = "Density")
+
+stateGreen_longHIHW <- pivot_longer(stateGreen_expHighInc, cols = c("Work", "Home"), names_to = "type", values_to = "value" )
+boxplot(stateGreen_longHIHW$value ~ stateGreen_longHIHW$type, col=c("darkslateblue", "seagreen"), main="Home and Work Green Space Exposure for High Income", xlab="Home vs. Work", ylab="Green Space Percentage")
+ggplot(stateGreen_longHIHW, aes(x = value, color = type)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  scale_color_manual(values = c("Work" = "seagreen", "Home" = "darkslateblue")) +
+  labs(title = "Home and Work Green Space Exposure for High Income",
+       x = "Green Space Percentage",
+       y = "Density")
+
+#ANOVA Testing
+#install.packages(c("ggpubr", "tidyverse", "broom", "AICcmodavg"))
+library(ggpubr)
+library(tidyverse)
+library(broom)
+library(AICcmodavg)
+
+#Group data by income level for ANOVA testing
+groupedIncomes <- rbind(stateGreen_expLowInc, stateGreen_expMidInc, stateGreen_expHighInc)
+summary(groupedIncomes)
+
+#Some visuals
+ggplot(groupedIncomes, aes(x = Group, y = Mobility)) +
+  geom_boxplot()
+ggplot(groupedIncomes, aes(x = Group, y = Home)) +
+  geom_boxplot()
+ggplot(groupedIncomes, aes(x = Group, y = Work)) +
+  geom_boxplot()
+
+ggplot(groupedIncomes, aes(x = Mobility)) +
+  geom_histogram() + 
+  facet_wrap(~Group, ncol = 1)
+
+groupedIncomes %>%
+  group_by(Group) %>%
+  summarize(var(Mobility))
+
+groupedIncomes %>%
+  group_by(Group) %>%
+  summarize(var(Home))
+
+groupedIncomes %>%
+  group_by(Group) %>%
+  summarize(var(Work))
+
+#ANOVA and Post Hoc testing calculations
+one.wayMobility <- aov(Mobility ~ Group, data = groupedIncomes)
+summary(one.wayMobility)
+tukeytestMobility <- TukeyHSD(one.wayMobility)
+tukeytestMobility
+
+one.wayHome <- aov(Home ~ Group, data = groupedIncomes)
+summary(one.wayHome)
+tukeytestHome <- TukeyHSD(one.wayHome)
+tukeytestHome
+
+one.wayWork <- aov(Work ~ Group, data = groupedIncomes)
+summary(one.wayWork)
+tukeytestWork <- TukeyHSD(one.wayWork)
+tukeytestWork
+
+#Plot results of post hoc tests
+plot(tukeytestMobility) 
+plot(tukeytestHome) 
+plot(tukeytestWork)
+
+mean(stateGreen_expLowInc$Work)
+mean(stateGreen_expLowInc$Home)
+mean(stateGreen_expLowInc$Mobility)
+mean(stateGreen_expMidInc$Work)
+mean(stateGreen_expMidInc$Home)
+mean(stateGreen_expMidInc$Mobility)
+mean(stateGreen_expHighInc$Work)
+mean(stateGreen_expHighInc$Home)
+mean(stateGreen_expHighInc$Mobility)
+
+sd(stateGreen_expLowInc$Home)
+sd(stateGreen_expLowInc$Mobility)
+sd(stateGreen_expMidInc$Home)
+sd(stateGreen_expMidInc$Mobility)
+sd(stateGreen_expHighInc$Home)
+sd(stateGreen_expHighInc$Mobility)
+
+#Box plots of income level data with post testing significance (*** p < 0.001, ** p < 0.01, * p < 0.05, ns = not significant)
+tuk_mob <- as.data.frame(tukeytestMobility$Group)
+tuk_mob$comparison <- rownames(tuk_mob)
+tuk_mob <- tuk_mob %>%
+  separate(comparison, into = c("group1", "group2"), sep = "-")
+tuk_mob$stars <- cut(
+  tuk_mob$`p adj`,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+  labels = c("***", "**", "*", "ns")
+)
+p1mob <- ggplot(groupedIncomes, aes(factor(Group, levels = c("Low", "Middle", "High")), Mobility, color = Group)) +
+  geom_boxplot() +
+  stat_pvalue_manual(
+    tuk_mob,
+    label = "stars",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = c(1.1, 1.05, 1.05)) +
+  ggtitle("Mobility") +
+  scale_color_manual(values = c("Low" = "blue4", "Middle" = "firebrick2", "High" = "cyan4")) +
+  labs(x = "Income Level", y = "Density") 
+
+tuk_home <- as.data.frame(tukeytestHome$Group)
+tuk_home$comparison <- rownames(tuk_home)
+tuk_home <- tuk_home %>%
+  separate(comparison, into = c("group1", "group2"), sep = "-")
+tuk_home$stars <- cut(
+  tuk_home$`p adj`,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+  labels = c("***", "**", "*", "ns")
+)
+p2home <-ggplot(groupedIncomes, aes(factor(Group, levels = c("Low", "Middle", "High")), Home, color = Group)) +
+  geom_boxplot() +
+  stat_pvalue_manual(
+    tuk_home,
+    label = "stars",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = c(1.1, 1.05, 1.05)) +
+  ggtitle("Home")+
+  scale_color_manual(values = c("Low" = "blue4", "Middle" = "firebrick2", "High" = "cyan4")) +
+  labs(x = "Income Level", y = "Density") 
+
+#Do not need to plot work 
+tuk_work <- as.data.frame(tukeytestWork$Group)
+tuk_work$comparison <- rownames(tuk_work)
+tuk_work <- tuk_work %>%
+  separate(comparison, into = c("group1", "group2"), sep = "-")
+tuk_work$stars <- cut(
+  tuk_work$`p adj`,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+  labels = c("***", "**", "*", "ns")
+)
+p3work <- ggplot(groupedIncomes, aes(factor(Group, levels = c("Low", "Middle", "High")), Work, color = Group)) +
+  geom_boxplot() +
+  stat_pvalue_manual(
+    tuk_work,
+    label = "stars",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = c(1.1, 1.05, 1.05)) +
+  ggtitle("Work")+
+  scale_color_manual(values = c("Low" = "blue4", "Middle" = "firebrick2", "High" = "cyan4")) +
+  labs(x = "Income Level", y = "Density") 
+
+install.packages('patchwork')
+library(patchwork)
+p2home + p1mob
